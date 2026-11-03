@@ -75,6 +75,55 @@ def send_telegram(text, dry_run=False):
         resp.read()
 
 
+def telegram_api(method, params):
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = urllib.parse.urlencode(params).encode()
+    with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20) as resp:
+        return json.loads(resp.read())
+
+
+def series_page(rss_url):
+    """Turn a .../rss?title_no=N feed link into the series' .../list?title_no=N page."""
+    return rss_url.replace("/rss?", "/list?")
+
+
+def format_list(series_list):
+    lines = [f"📚 Tracking {len(series_list)} series:"]
+    for i, s in enumerate(series_list, 1):
+        lines.append(f"{i}. {s['name']}\n   {series_page(s['rss'])}")
+    return "\n".join(lines)
+
+
+def handle_commands(series_list, state, dry_run=False):
+    """Answer bot commands (/list) sent since the last run.
+
+    The bot isn't always online: commands queue up on Telegram's side and get
+    answered whenever this script runs. Only the configured chat is answered.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    try:
+        offset = state.get("_telegram_offset", 0)
+        updates = telegram_api("getUpdates", {"offset": offset, "timeout": 0}).get("result", [])
+    except Exception as e:
+        print(f"[error] telegram getUpdates: {e}", file=sys.stderr)
+        return
+
+    for upd in updates:
+        state["_telegram_offset"] = upd["update_id"] + 1
+        msg = upd.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != str(chat_id):
+            continue  # ignore strangers who find the bot
+        command = (msg.get("text") or "").strip().split()[:1]
+        command = command[0].split("@")[0].lower() if command else ""
+        if command in ("/list", "/start"):
+            send_telegram(format_list(series_list), dry_run=dry_run)
+            print(f"[command] answered {command}")
+
+
 def check_series(series, state, dry_run=False):
     name = series["name"]
     url = series["rss"]
@@ -117,6 +166,7 @@ def main():
         return
 
     state = load_json(STATE_FILE, {})
+    handle_commands(series_list, state, dry_run=args.dry_run)
     total = 0
     for series in series_list:
         total += check_series(series, state, dry_run=args.dry_run)
