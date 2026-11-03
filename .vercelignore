@@ -1,3 +1,4 @@
 state.json
 .github
 __pycache__
+tests
