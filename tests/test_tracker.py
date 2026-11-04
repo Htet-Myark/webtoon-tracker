@@ -1,5 +1,6 @@
 """Tests for the episode checker (tracker.py). No network: feeds are fixtures."""
 
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -117,6 +118,27 @@ class SendTelegramTest(unittest.TestCase):
              mock.patch("builtins.print"):
             tracker.send_telegram("hello", dry_run=True)
         urlopen.assert_not_called()
+
+    def test_strips_bom_and_whitespace_from_secrets(self):
+        env = {"TELEGRAM_BOT_TOKEN": "﻿123:abc\n", "TELEGRAM_CHAT_ID": "﻿ 42 \r\n"}
+        with mock.patch.dict("os.environ", env, clear=True), \
+             mock.patch.object(tracker.urllib.request, "urlopen") as urlopen:
+            tracker.send_telegram("hello")
+        req = urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "https://api.telegram.org/bot123:abc/sendMessage")
+        self.assertIn(b"chat_id=42&", req.data)
+
+    def test_telegram_error_reason_is_reported_without_token(self):
+        env = {"TELEGRAM_BOT_TOKEN": "123:secret", "TELEGRAM_CHAT_ID": "42"}
+        body = io.BytesIO(b'{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}')
+        err = tracker.urllib.error.HTTPError("https://api.telegram.org/bot123:secret/sendMessage",
+                                             400, "Bad Request", {}, body)
+        with mock.patch.dict("os.environ", env, clear=True), \
+             mock.patch.object(tracker.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(RuntimeError) as ctx:
+                tracker.send_telegram("hello")
+        self.assertIn("chat not found", str(ctx.exception))
+        self.assertNotIn("secret", str(ctx.exception))
 
 
 class SeriesFileTest(unittest.TestCase):

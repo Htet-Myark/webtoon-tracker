@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -59,9 +60,19 @@ def parse_episodes(xml_bytes):
     return episodes
 
 
+def clean_env(name):
+    """Read a secret, dropping whitespace and any byte-order mark (U+FEFF).
+
+    A secret saved from Windows PowerShell 5.1 or a "UTF-8 with BOM" file
+    starts with an invisible U+FEFF. In the token it crashes the request
+    (the URL must be ASCII); in the chat ID Telegram answers "chat not found".
+    """
+    return (os.environ.get(name) or "").replace("﻿", "").strip()
+
+
 def send_telegram(text, dry_run=False):
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    token = clean_env("TELEGRAM_BOT_TOKEN")
+    chat_id = clean_env("TELEGRAM_CHAT_ID")
     if dry_run or not token or not chat_id:
         print("[notify]", text.replace("\n", " | "))
         return
@@ -71,8 +82,17 @@ def send_telegram(text, dry_run=False):
         "text": text,
         "disable_web_page_preview": "false",
     }).encode()
-    with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20) as resp:
-        resp.read()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        # Telegram explains every rejection ("chat not found", "Unauthorized", ...)
+        # in the body. Surface that, never the URL: it contains the token.
+        try:
+            reason = json.loads(e.read()).get("description", "")
+        except Exception:
+            reason = ""
+        raise RuntimeError(f"Telegram sendMessage failed: HTTP {e.code} {reason}".rstrip()) from None
 
 
 def check_series(series, state, dry_run=False):
